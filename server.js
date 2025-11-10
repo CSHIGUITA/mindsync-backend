@@ -27,12 +27,14 @@ const logger = winston.createLogger({
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware de seguridad
-app.use(helmet());
+// CORS configuración corregida - permite cualquier origen
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  origin: '*', // Permitir cualquier origen
   credentials: true
 }));
+
+// Middleware de seguridad
+app.use(helmet());
 
 // Rate limiting
 const limiter = rateLimit({
