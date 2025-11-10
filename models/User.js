@@ -15,13 +15,15 @@ const userSchema = new mongoose.Schema({
     unique: true,
     lowercase: true,
     trim: true,
-    match: [/^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/, 'Por favor ingresa un email válido']
+    // CORRECCIÓN: Expresión regular más permisiva para emails
+    match: [/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/, 'Por favor ingresa un email válido']
   },
   
   password: {
     type: String,
     required: [true, 'La contraseña es requerida'],
-    minlength: [8, 'La contraseña debe tener al menos 8 caracteres']
+    // CORRECCIÓN: Alineado con auth.js (6 caracteres mínimo)
+    minlength: [6, 'La contraseña debe tener al menos 6 caracteres']
   },
   
   // Información demográfica
