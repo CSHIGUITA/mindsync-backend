@@ -1,8 +1,6 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
-const Joi = require('joi');
 const User = require('../models/User');
-const { authenticate } = require('../middleware/auth');
 const logger = require('../logger');
 
 const router = express.Router();
@@ -20,6 +18,65 @@ const validateBasic = (data, requiredFields) => {
 // Helper function to get username from request
 const getUsername = (req) => {
   return req.body.name || req.body.username || 'Usuario';
+};
+
+// Simple authentication middleware
+const authenticate = async (req, res, next) => {
+  try {
+    const authHeader = req.header('Authorization');
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        error: 'Token de autenticación requerido'
+      });
+    }
+    
+    const token = authHeader.substring(7);
+    
+    // Verify token
+    const decoded = jwt.verify(
+      token,
+      process.env.JWT_SECRET || 'default-secret'
+    );
+    
+    // Check if token type is correct
+    if (decoded.type !== 'access') {
+      return res.status(401).json({
+        error: 'Tipo de token inválido'
+      });
+    }
+    
+    // Find user
+    const user = await User.findById(decoded.userId);
+    if (!user) {
+      return res.status(401).json({
+        error: 'Usuario no encontrado'
+      });
+    }
+    
+    // Add user info to request
+    req.userId = decoded.userId;
+    req.user = user;
+    req.token = token;
+    
+    next();
+  } catch (error) {
+    if (error.name === 'JsonWebTokenError') {
+      return res.status(401).json({
+        error: 'Token inválido'
+      });
+    }
+    
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({
+        error: 'Token expirado'
+      });
+    }
+    
+    res.status(500).json({
+      error: 'Error de autenticación'
+    });
+  }
 };
 
 // Register new user
