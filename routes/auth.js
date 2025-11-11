@@ -29,88 +29,143 @@ const authenticateToken = (req, res, next) => {
 // Rutas de autenticación
 router.post('/register', async (req, res) => {
   try {
+    // ✅ DEBUGGING: Log de todos los datos recibidos
+    console.log('=== REGISTER DEBUG ===');
+    console.log('req.body:', JSON.stringify(req.body, null, 2));
+    console.log('req.headers:', JSON.stringify({
+      'content-type': req.headers['content-type'],
+      'user-agent': req.headers['user-agent'],
+      'origin': req.headers.origin
+    }, null, 2));
+    console.log('req.ip:', req.ip);
+    console.log('========================');
+    
     const { username, email, password } = req.body;
 
-    // Validaciones
-    if (!username || !email || !password) {
-      return res.status(400).json({ error: 'Todos los campos son requeridos' });
+    // ✅ VALIDACIONES MEJORADAS: Logs específicos para cada validación
+    if (!username) {
+      console.log('❌ FALTA username');
+      return res.status(400).json({ error: 'El nombre de usuario es requerido' });
+    }
+    
+    if (!email) {
+      console.log('❌ FALTA email');
+      return res.status(400).json({ error: 'El email es requerido' });
+    }
+    
+    if (!password) {
+      console.log('❌ FALTA password');
+      return res.status(400).json({ error: 'La contraseña es requerida' });
     }
 
     if (password.length < 6) {
+      console.log('❌ PASSWORD MUY CORTA:', password.length);
       return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
     }
 
-    // Verificar si el usuario ya existe
-    const existingUser = await User.findOne({
-      $or: [{ email }, { username }]
-    });
-
-    if (existingUser) {
-      return res.status(400).json({ 
-        error: existingUser.email === email 
-          ? 'El email ya está registrado' 
-          : 'El nombre de usuario ya está en uso' 
-      });
+    if (username.length < 3) {
+      console.log('❌ USERNAME MUY CORTO:', username.length);
+      return res.status(400).json({ error: 'El nombre de usuario debe tener al menos 3 caracteres' });
     }
 
-    // Hash de la contraseña
-    const saltRounds = 12;
-    const hashedPassword = await bcrypt.hash(password, saltRounds);
+    // ✅ EMAIL VALIDATION SIMPLE
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      console.log('❌ EMAIL INVÁLIDO:', email);
+      return res.status(400).json({ error: 'El email no es válido' });
+    }
 
-    // Crear nuevo usuario
-    const newUser = new User({
-      username: username.trim(),
-      email: email.trim().toLowerCase(),
-      password: hashedPassword
-    });
+    console.log('✅ VALIDACIONES PASADAS');
 
-    await newUser.save();
+    // ✅ PROCESO DE REGISTRO CON LOGS
+    try {
+      // Verificar si el usuario ya existe
+      const existingUser = await User.findOne({
+        $or: [{ email: email.toLowerCase() }, { username: username.toLowerCase() }]
+      });
 
-    // Generar tokens
-    const accessToken = jwt.sign(
-      { 
-        userId: newUser._id, 
-        username: newUser.username 
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: '15m' }
-    );
-
-    const refreshToken = jwt.sign(
-      { 
-        userId: newUser._id, 
-        username: newUser.username 
-      },
-      process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET,
-      { expiresIn: '7d' }
-    );
-
-    res.status(201).json({
-      message: 'Usuario registrado exitosamente',
-      user: {
-        id: newUser._id,
-        username: newUser.username,
-        email: newUser.email,
-        isFirstLogin: newUser.isFirstLogin
-      },
-      tokens: {
-        accessToken,
-        refreshToken
+      if (existingUser) {
+        console.log('❌ USUARIO YA EXISTE:', existingUser.email, existingUser.username);
+        return res.status(400).json({ 
+          error: existingUser.email === email.toLowerCase()
+            ? 'El email ya está registrado' 
+            : 'El nombre de usuario ya está en uso' 
+        });
       }
-    });
+
+      console.log('✅ USUARIO NO EXISTE, PROCEDER CON REGISTRO');
+
+      // Hash de la contraseña
+      const saltRounds = 12;
+      const hashedPassword = await bcrypt.hash(password, saltRounds);
+      console.log('✅ CONTRASEÑA HASHEADA');
+
+      // Crear nuevo usuario
+      const newUser = new User({
+        username: username.trim().toLowerCase(),
+        email: email.trim().toLowerCase(),
+        password: hashedPassword
+      });
+
+      await newUser.save();
+      console.log('✅ USUARIO GUARDADO EN BD:', newUser._id);
+
+      // Generar tokens
+      const accessToken = jwt.sign(
+        { 
+          userId: newUser._id, 
+          username: newUser.username 
+        },
+        process.env.JWT_SECRET,
+        { expiresIn: '15m' }
+      );
+
+      const refreshToken = jwt.sign(
+        { 
+          userId: newUser._id, 
+          username: newUser.username 
+        },
+        process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET,
+        { expiresIn: '7d' }
+      );
+
+      console.log('✅ TOKENS GENERADOS');
+
+      res.status(201).json({
+        message: 'Usuario registrado exitosamente',
+        user: {
+          id: newUser._id,
+          username: newUser.username,
+          email: newUser.email,
+          isFirstLogin: newUser.isFirstLogin
+        },
+        tokens: {
+          accessToken,
+          refreshToken
+        }
+      });
+
+    } catch (dbError) {
+      console.error('❌ ERROR DE BASE DE DATOS:', dbError);
+      res.status(500).json({ error: 'Error al guardar en la base de datos' });
+    }
 
   } catch (error) {
-    console.error('Error en registro:', error);
+    console.error('❌ ERROR GENERAL EN REGISTRO:', error);
     res.status(500).json({ error: 'Error interno del servidor' });
   }
 });
 
 router.post('/login', async (req, res) => {
   try {
+    console.log('=== LOGIN DEBUG ===');
+    console.log('req.body:', JSON.stringify(req.body, null, 2));
+    
     const { email, password } = req.body;
 
     // Validaciones
     if (!email || !password) {
+      console.log('❌ FALTA EMAIL O PASSWORD');
       return res.status(400).json({ error: 'Email y contraseña son requeridos' });
     }
 
@@ -120,6 +175,7 @@ router.post('/login', async (req, res) => {
     });
 
     if (!user) {
+      console.log('❌ USUARIO NO ENCONTRADO:', email);
       return res.status(400).json({ error: 'Credenciales inválidas' });
     }
 
@@ -127,6 +183,7 @@ router.post('/login', async (req, res) => {
     const isPasswordValid = await bcrypt.compare(password, user.password);
 
     if (!isPasswordValid) {
+      console.log('❌ PASSWORD INVÁLIDO');
       return res.status(400).json({ error: 'Credenciales inválidas' });
     }
 
@@ -153,6 +210,8 @@ router.post('/login', async (req, res) => {
       { expiresIn: '7d' }
     );
 
+    console.log('✅ LOGIN EXITOSO');
+
     res.json({
       message: 'Login exitoso',
       user: {
@@ -168,7 +227,7 @@ router.post('/login', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error en login:', error);
+    console.error('❌ ERROR EN LOGIN:', error);
     res.status(500).json({ error: 'Error interno del servidor' });
   }
 });
