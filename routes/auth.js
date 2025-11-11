@@ -26,6 +26,11 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+// ✅ CAMPO FLEXIBLE: Aceptar tanto "name" como "username"
+const getUsername = (req) => {
+  return req.body.username || req.body.name;
+};
+
 // Rutas de autenticación
 router.post('/register', async (req, res) => {
   try {
@@ -40,11 +45,13 @@ router.post('/register', async (req, res) => {
     console.log('req.ip:', req.ip);
     console.log('========================');
     
-    const { username, email, password } = req.body;
+    // ✅ CAMPO FLEXIBLE: Obtener username de "username" O "name"
+    const username = getUsername(req);
+    const { email, password } = req.body;
 
     // ✅ VALIDACIONES MEJORADAS: Logs específicos para cada validación
     if (!username) {
-      console.log('❌ FALTA username');
+      console.log('❌ FALTA username/name');
       return res.status(400).json({ error: 'El nombre de usuario es requerido' });
     }
     
@@ -76,12 +83,16 @@ router.post('/register', async (req, res) => {
     }
 
     console.log('✅ VALIDACIONES PASADAS');
+    console.log('✅ USERNAME ACEPTADO (name O username):', username);
 
     // ✅ PROCESO DE REGISTRO CON LOGS
     try {
-      // Verificar si el usuario ya existe
+      // Verificar si el usuario ya existe (usando username normalizado)
       const existingUser = await User.findOne({
-        $or: [{ email: email.toLowerCase() }, { username: username.toLowerCase() }]
+        $or: [
+          { email: email.toLowerCase() }, 
+          { username: username.toLowerCase().trim() }
+        ]
       });
 
       if (existingUser) {
@@ -100,9 +111,12 @@ router.post('/register', async (req, res) => {
       const hashedPassword = await bcrypt.hash(password, saltRounds);
       console.log('✅ CONTRASEÑA HASHEADA');
 
+      // ✅ GUARDAR USERNAME NORMALIZADO
+      const normalizedUsername = username.toLowerCase().trim();
+      
       // Crear nuevo usuario
       const newUser = new User({
-        username: username.trim().toLowerCase(),
+        username: normalizedUsername, // Siempre en minúsculas y sin espacios extra
         email: email.trim().toLowerCase(),
         password: hashedPassword
       });
@@ -130,6 +144,7 @@ router.post('/register', async (req, res) => {
       );
 
       console.log('✅ TOKENS GENERADOS');
+      console.log('✅ REGISTRO EXITOSO:', newUser.username);
 
       res.status(201).json({
         message: 'Usuario registrado exitosamente',
@@ -169,7 +184,7 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ error: 'Email y contraseña son requeridos' });
     }
 
-    // Buscar usuario por email
+    // ✅ LOGIN FLEXIBLE: Buscar por email normalizado
     const user = await User.findOne({ 
       email: email.trim().toLowerCase() 
     });
