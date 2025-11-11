@@ -161,7 +161,7 @@ Responde de manera concisa pero cálida, generalmente en 2-3 párrafos. Nunca pr
         presence_penalty: 0
       });
 
-      chatResponse = completion.choices[0]message.content.trim();
+      chatResponse = completion.choices[0].message.content.trim();
       logger.info('Respuesta de OpenAI generada', { 
         userId, 
         responseLength: chatResponse.length 
