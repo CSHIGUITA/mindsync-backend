@@ -3,43 +3,18 @@ const jwt = require('jsonwebtoken');
 const Joi = require('joi');
 const User = require('../models/User');
 const { authenticate } = require('../middleware/auth');
-const { validateRequest } = require('../middleware/validation');
 const logger = require('../logger');
 
 const router = express.Router();
 
-// Validation schemas
-const registerSchema = Joi.object({
-  name: Joi.string().min(2).max(100).required(),
-  email: Joi.string().email().required(),
-  password: Joi.string().min(6).max(128).required(),
-  userType: Joi.string().valid('free', 'student', 'professional').default('student')
-});
-
-const loginSchema = Joi.object({
-  email: Joi.string().email().required(),
-  password: Joi.string().required()
-});
-
-const refreshTokenSchema = Joi.object({
-  refreshToken: Joi.string().required()
-});
-
-// Generate JWT tokens
-const generateTokens = (userId) => {
-  const accessToken = jwt.sign(
-    { userId, type: 'access' },
-    process.env.JWT_SECRET || 'default-secret',
-    { expiresIn: '15m' }
-  );
-  
-  const refreshToken = jwt.sign(
-    { userId, type: 'refresh' },
-    process.env.JWT_REFRESH_SECRET || 'default-refresh-secret',
-    { expiresIn: '7d' }
-  );
-  
-  return { accessToken, refreshToken };
+// Helper function to validate basic requirements
+const validateBasic = (data, requiredFields) => {
+  for (const field of requiredFields) {
+    if (!data[field] || data[field].trim() === '') {
+      return `${field} is required`;
+    }
+  }
+  return null;
 };
 
 // Helper function to get username from request
@@ -48,7 +23,7 @@ const getUsername = (req) => {
 };
 
 // Register new user
-router.post('/register', validateRequest(registerSchema), async (req, res) => {
+router.post('/register', async (req, res) => {
   console.log('=== REGISTER DEBUG ===');
   console.log('req.body:', JSON.stringify(req.body, null, 2));
   console.log('req.headers:', JSON.stringify(req.headers, null, 2));
@@ -57,6 +32,29 @@ router.post('/register', validateRequest(registerSchema), async (req, res) => {
   
   try {
     const { name, email, password, userType } = req.body;
+    
+    // Basic validation
+    const validationError = validateBasic({ name, email, password }, ['name', 'email', 'password']);
+    if (validationError) {
+      return res.status(400).json({
+        error: `Missing required field: ${validationError}`
+      });
+    }
+    
+    // Email format validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        error: 'Invalid email format'
+      });
+    }
+    
+    // Password length validation
+    if (password.length < 6) {
+      return res.status(400).json({
+        error: 'Password must be at least 6 characters'
+      });
+    }
     
     const username = getUsername(req);
     console.log('✅ USERNAME ACEPTADO (name O username):', username);
@@ -75,7 +73,7 @@ router.post('/register', validateRequest(registerSchema), async (req, res) => {
       username: username.toLowerCase().trim(),
       email: email.toLowerCase(),
       password,
-      userType,
+      userType: userType || 'student',
       stats: {
         totalSessions: 0,
         totalMessages: 0,
@@ -118,12 +116,28 @@ router.post('/register', validateRequest(registerSchema), async (req, res) => {
 });
 
 // Login user
-router.post('/login', validateRequest(loginSchema), async (req, res) => {
+router.post('/login', async (req, res) => {
   console.log('=== LOGIN DEBUG ===');
   console.log('req.body:', JSON.stringify(req.body, null, 2));
   
   try {
     const { email, password } = req.body;
+    
+    // Basic validation
+    const validationError = validateBasic({ email, password }, ['email', 'password']);
+    if (validationError) {
+      return res.status(400).json({
+        error: `Missing required field: ${validationError}`
+      });
+    }
+    
+    // Email format validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        error: 'Invalid email format'
+      });
+    }
     
     // Find user
     const user = await User.findOne({ email: email.toLowerCase() });
@@ -165,6 +179,23 @@ router.post('/login', validateRequest(loginSchema), async (req, res) => {
     });
   }
 });
+
+// Generate JWT tokens
+const generateTokens = (userId) => {
+  const accessToken = jwt.sign(
+    { userId, type: 'access' },
+    process.env.JWT_SECRET || 'default-secret',
+    { expiresIn: '15m' }
+  );
+  
+  const refreshToken = jwt.sign(
+    { userId, type: 'refresh' },
+    process.env.JWT_REFRESH_SECRET || 'default-refresh-secret',
+    { expiresIn: '7d' }
+  );
+  
+  return { accessToken, refreshToken };
+};
 
 // Get current user
 router.get('/me', authenticate, async (req, res) => {
