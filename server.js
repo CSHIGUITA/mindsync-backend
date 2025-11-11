@@ -14,6 +14,67 @@ const app = express();
 // ✅ CORRECCIÓN CLAVE: Configurar trust proxy para Railway
 app.set('trust proxy', 1);
 
+// ✅ CORS CORREGIDO: Configuración completa para todos los escenarios
+app.use(cors({
+  origin: function (origin, callback) {
+    // Permitir requests sin origin (como apps móviles, postman, etc.)
+    if (!origin) return callback(null, true);
+    
+    // Lista de dominios permitidos
+    const allowedOrigins = [
+      'http://localhost:3000',      // Frontend local
+      'http://localhost:8080',      // Frontend local alternativo
+      'http://127.0.0.1:3000',     // Frontend local IP
+      'http://127.0.0.1:8080',     // Frontend local IP alternativo
+      'https://camshiquita.github.io', // GitHub Pages
+      'https://*.github.io',        // Cualquier GitHub Pages
+      '*'                          // Permitir todo (temporal)
+    ];
+    
+    // Verificar si el origen está permitido
+    const allowed = allowedOrigins.some(allowedOrigin => {
+      if (allowedOrigin === '*') return true;
+      if (allowedOrigin.endsWith('*')) {
+        const prefix = allowedOrigin.slice(0, -1);
+        return origin.startsWith(prefix);
+      }
+      return origin === allowedOrigin;
+    });
+    
+    if (allowed) {
+      callback(null, true);
+    } else {
+      callback(new Error('No permitido por la política de CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: [
+    'Content-Type', 
+    'Authorization', 
+    'X-Requested-With',
+    'Accept',
+    'Origin',
+    'Cache-Control'
+  ],
+  exposedHeaders: ['X-Total-Count'],
+  maxAge: 86400 // 24 horas
+}));
+
+// ✅ CORS ESPECÍFICO PARA MÉTODOS OPTIONS
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  
+  // Manejar preflight requests
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
 // Configurar logger personalizado
 const logger = winston.createLogger({
   level: 'info',
@@ -30,7 +91,7 @@ const logger = winston.createLogger({
 
 // Middleware para logging de requests
 app.use((req, res, next) => {
-  logger.info(`${req.method} ${req.path}`, { ip: req.ip });
+  logger.info(`${req.method} ${req.path}`, { ip: req.ip, origin: req.headers.origin });
   next();
 });
 
@@ -51,14 +112,6 @@ const limiter = rateLimit({
 
 // Aplicar rate limiting a todas las rutas
 app.use(limiter);
-
-// Middleware para CORS
-app.use(cors({
-  origin: '*',
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
 
 // Middleware para parsing JSON
 app.use(express.json({ limit: '10mb' }));
