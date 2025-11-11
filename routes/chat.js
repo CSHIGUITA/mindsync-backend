@@ -1,167 +1,244 @@
 const express = require('express');
-const mongoose = require('mongoose');
-const logger = require('../logger'); // Usar logger personalizado
-const OpenAI = require('openai');
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
+const logger = require('../logger');
+
 const router = express.Router();
 
-// Inicializar OpenAI
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
-
-// Middleware simple de autenticación
-async function authenticate(req, res, next) {
-  const authHeader = req.headers.authorization;
-  
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Token de autorización requerido' });
-  }
-  
-  const token = authHeader.substring(7);
-  
+// ✅ MIDDLEWARE DE AUTENTICACIÓN MEJORADO
+const authenticateToken = async (req, res, next) => {
   try {
-    const jwt = require('jsonwebtoken');
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) {
+      logger.warn('Token no proporcionado', { path: req.path, ip: req.ip });
+      return res.status(401).json({ error: 'Token de acceso requerido' });
+    }
+
+    // Verificar y decodificar token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     
-    // Buscar usuario
-    const User = mongoose.model('User');
-    const user = await User.findById(decoded.userId);
-    
+    // Verificar que el usuario existe
+    const user = await User.findById(decoded.userId).select('-password');
     if (!user) {
-      return res.status(401).json({ error: 'Usuario no encontrado' });
+      logger.warn('Usuario no encontrado en BD', { userId: decoded.userId, ip: req.ip });
+      return res.status(403).json({ error: 'Usuario no encontrado' });
     }
-    
+
+    // Adjuntar usuario a la request
     req.user = user;
-    req.userId = user._id;
+    req.userId = decoded.userId;
+    
     next();
   } catch (error) {
-    logger.error('Error de autenticación:', error);
-    res.status(401).json({ error: 'Token inválido' });
-  }
-}
-
-// POST /api/chat - Enviar mensaje
-router.post('/', authenticate, async (req, res) => {
-  try {
-    const { message } = req.body;
-    
-    if (!message || message.trim().length === 0) {
-      return res.status(400).json({ 
-        error: 'Mensaje requerido' 
-      });
-    }
-    
-    if (message.length > 1000) {
-      return res.status(400).json({ 
-        error: 'El mensaje es demasiado largo (máximo 1000 caracteres)' 
-      });
-    }
-    
-    logger.info(`Chat request from user: ${req.user.email}`, {
-      userId: req.userId,
-      messageLength: message.length
+    logger.error('Error en autenticación', { 
+      error: error.message, 
+      token: req.headers.authorization?.substring(0, 50) + '...',
+      ip: req.ip 
     });
     
-    // Generar respuesta con OpenAI
-    let aiResponse = '';
+    if (error.name === 'JsonWebTokenError') {
+      return res.status(403).json({ error: 'Token inválido' });
+    }
     
+    if (error.name === 'TokenExpiredError') {
+      return res.status(403).json({ error: 'Token expirado' });
+    }
+    
+    return res.status(403).json({ error: 'Error de autenticación' });
+  }
+};
+
+// ✅ VALIDAR LÍMITES DE CONVERSACIÓN
+const checkConversationLimit = (req, res, next) => {
+  const messages = req.body.messages || [];
+  const MAX_MESSAGES = 50;
+  
+  if (messages.length > MAX_MESSAGES) {
+    return res.status(400).json({ 
+      error: `Máximo ${MAX_MESSAGES} mensajes por conversación` 
+    });
+  }
+  
+  next();
+};
+
+// ✅ VALIDAR ENTRADA DE CRISIS
+const validateCrisisInput = (req, res, next) => {
+  const message = req.body.message?.toLowerCase() || '';
+  
+  const crisisKeywords = [
+    'suicid', 'suicidio', 'matarme', 'quiero morir', 'terminar con todo',
+    'no veo salida', 'desesperacion', 'autolesionar', 'lastimarme',
+    'mejor sin mí', 'no vale la pena', 'muy triste para vivir'
+  ];
+  
+  const isCrisis = crisisKeywords.some(keyword => message.includes(keyword));
+  
+  if (isCrisis) {
+    req.isCrisis = true;
+  }
+  
+  next();
+};
+
+// ✅ CHAT CON OPENAI + FALLBACK
+router.post('/', authenticateToken, checkConversationLimit, validateCrisisInput, async (req, res) => {
+  try {
+    const { message, messages = [] } = req.body;
+    const userId = req.userId;
+    
+    if (!message) {
+      return res.status(400).json({ error: 'El mensaje es requerido' });
+    }
+
+    logger.info('Mensaje de chat recibido', { 
+      userId, 
+      messageLength: message.length, 
+      messagesCount: messages.length,
+      ip: req.ip 
+    });
+
+    // ✅ VALIDACIÓN DE CRISIS
+    if (req.isCrisis) {
+      logger.warn('Palabras de crisis detectadas', { 
+        userId, 
+        message: message.substring(0, 100),
+        ip: req.ip 
+      });
+      
+      const crisisResponse = {
+        response: "Estoy muy preocupado por lo que me dices. Por favor, busca ayuda profesional inmediatamente. Si estás en peligro, contacta los servicios de emergencia. También puedes llamar a líneas de crisis como:\n\n• Línea de crisis emocional: 024\n• Emergencias: 911\n• Chat de ayuda: https://www.crisistextline.org/\n\nTu vida es valiosa y hay personas que pueden ayudarte. No estás solo en esto.",
+        type: 'crisis',
+        isEmergency: true
+      };
+      
+      // Actualizar estadísticas del usuario
+      await User.updateOne(
+        { _id: userId },
+        {
+          $inc: { totalSessions: 1, totalMessages: 1 },
+          $set: { lastActivity: new Date() }
+        }
+      );
+      
+      return res.json(crisisResponse);
+    }
+
+    let chatResponse = '';
+
+    // ✅ INTENTO CON OPENAI
     try {
-      const completion = await openai.chat.completions.create({
+      const OpenAI = require('openai');
+      const client = new OpenAI({
+        apiKey: process.env.OPENAI_API_KEY,
+      });
+
+      const systemPrompt = `Eres MindSync, un asistente de bienestar emocional empático y comprensivo. Tu objetivo es:
+
+1. Ser un escucha activo y sin juicios
+2. Ofrecer apoyo emocional genuino
+3. Hacer preguntas reflexivas para ayudar a la autoexploración
+4. Proporcionar técnicas simples de mindfulness y bienestar
+5. Mantener un tono cálido, profesional y esperanzador
+6. Siempre validar los sentimientos de la persona
+7. Si detectas pensamientos suicidas o de autolesión, responder con urgencia y proporcionar recursos de ayuda
+
+Responde de manera concisa pero cálida, generalmente en 2-3 párrafos. Nunca prometas soluciones mágicas, sino apoyo genuino en el proceso de bienestar.`;
+
+      const completion = await client.chat.completions.create({
         model: "gpt-3.5-turbo",
         messages: [
-          {
-            role: "system",
-            content: `Eres MindSync, un asistente de bienestar emocional especializado en salud mental. 
-            
-Tu trabajo es:
-- Ofrecer apoyo emocional empático y no judgemental
-- Usar técnicas de terapia cognitiva y conductual
-- Hacer preguntas reflexivas que ayuden al usuario a explorar sus pensamientos
-- Proporcionar ejercicios y técnicas de mindfulness cuando sea apropiado
-- Detectar señales de crisis y responder apropiadamente
-- Mantener un tono cálido, profesional y comprensivo
-
-NUNCA:
-- Dar consejos médicos específicos o diagnosticar
-- Reemplazar terapia profesional
-- Prometer curas o soluciones rápidas
-- Ignorar señales de autolesión o suicidio
-
-Responde en español de manera empática y profesional.`
-          },
-          {
-            role: "user",
-            content: message
-          }
+          { role: "system", content: systemPrompt },
+          ...messages.map(msg => ({ role: msg.role, content: msg.content })),
+          { role: "user", content: message }
         ],
         max_tokens: 500,
         temperature: 0.7,
-        presence_penalty: 0.1,
-        frequency_penalty: 0.1
+        top_p: 1,
+        frequency_penalty: 0,
+        presence_penalty: 0
+      });
+
+      chatResponse = completion.choices[0]message.content.trim();
+      logger.info('Respuesta de OpenAI generada', { 
+        userId, 
+        responseLength: chatResponse.length 
+      });
+
+    } catch (openaiError) {
+      logger.error('Error con OpenAI, usando respuesta de fallback', { 
+        userId, 
+        error: openaiError.message 
       });
       
-      aiResponse = completion.choices[0].message.content.trim();
+      // ✅ RESPUESTA DE FALLBACK
+      const fallbackResponses = [
+        "Gracias por compartir conmigo lo que sientes. Entiendo que puede ser difícil expresar lo que hay en tu interior. ¿Qué te gustaría explorar más profundamente hoy?",
+        "Escucho que estás pasando por un momento difícil. Recuerda que cada día es una nueva oportunidad para cuidar de ti mismo. ¿Hay algo específico que te gustaría trabajar?",
+        "Valoro mucho que compartas tus pensamientos conmigo. El bienestar emocional es un proceso, y estar aquí hablando es un paso importante. ¿Cómo puedo apoyarte mejor?",
+        "Es muy valiente de tu parte buscar apoyo. Cada persona merece sentir paz y equilibrio. ¿Qué te ayudaría a sentirte un poco mejor en este momento?"
+      ];
       
-    } catch (openaiError) {
-      logger.error('Error con OpenAI:', openaiError);
+      const randomIndex = Math.floor(Math.random() * fallbackResponses.length);
+      chatResponse = fallbackResponses[randomIndex];
       
-      // Respuesta de fallback si OpenAI falla
-      aiResponse = `Gracias por compartir esto conmigo. Entiendo que puede ser difícil y aprecio tu confianza al hablar sobre esto. 
-
-¿Te gustaría que exploremos juntos cómo te sientes en este momento? A veces, verbalizar nuestros pensamientos y emociones puede ayudarnos a entender mejor nuestra situación.
-
-Algunas preguntas que podrían ayudarte a reflexionar:
-- ¿Qué situaciones específicas están causando que te sientas así?
-- ¿Has notado patrones en estos sentimientos?
-- ¿Qué estrategias has probado antes que te hayan ayudado?
-
-Recuerda que estoy aquí para acompañarte en este proceso. ¿Qué te gustaría explorar primero?`;
+      logger.info('Respuesta de fallback usada', { 
+        userId, 
+        response: chatResponse.substring(0, 100) 
+      });
     }
-    
-    // Actualizar estadísticas del usuario
-    await req.user.updateOne({
-      $inc: {
-        'stats.totalSessions': 1,
-        'stats.totalMessages': 2
-      },
-      $set: {
-        'stats.lastActivity': new Date()
-      }
-    });
-    
-    logger.info(`Chat response sent to user: ${req.user.email}`, {
-      userId: req.userId,
-      responseLength: aiResponse.length
-    });
-    
-    res.json({
-      success: true,
-      response: aiResponse,
-      userMessage: message,
-      timestamp: new Date()
-    });
-    
-  } catch (error) {
-    logger.error('Error en chat:', error);
-    res.status(500).json({ 
-      error: 'Error interno del servidor al procesar el mensaje' 
-    });
-  }
-});
 
-// GET /api/chat/history - Obtener historial
-router.get('/history', authenticate, async (req, res) => {
-  try {
-    // Por ahora devolver historial vacío - se puede implementar después
-    res.json({
-      success: true,
-      history: [],
-      totalSessions: req.user.stats.totalSessions || 0
+    // ✅ ACTUALIZAR ESTADÍSTICAS DEL USUARIO
+    try {
+      await User.updateOne(
+        { _id: userId },
+        {
+          $inc: { 
+            totalSessions: 1, 
+            totalMessages: 1 
+          },
+          $set: { 
+            lastActivity: new Date() 
+          }
+        }
+      );
+      logger.info('Estadísticas de usuario actualizadas', { userId });
+    } catch (statsError) {
+      logger.error('Error actualizando estadísticas', { 
+        userId, 
+        error: statsError.message 
+      });
+      // No es crítico, continuar sin fallo
+    }
+
+    // ✅ RESPUESTA FINAL
+    const response = {
+      response: chatResponse,
+      type: 'normal',
+      timestamp: new Date().toISOString(),
+      sessionId: userId
+    };
+
+    logger.info('Chat completado exitosamente', { 
+      userId, 
+      responseType: response.type 
     });
+
+    res.json(response);
+
   } catch (error) {
-    logger.error('Error obteniendo historial:', error);
+    logger.error('Error en chat', { 
+      userId: req.userId, 
+      error: error.message, 
+      stack: error.stack,
+      ip: req.ip 
+    });
+    
     res.status(500).json({ 
-      error: 'Error al obtener historial' 
+      error: 'Error interno del servidor',
+      message: 'Ha ocurrido un error procesando tu mensaje. Por favor intenta de nuevo.'
     });
   }
 });
