@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
 
 const userSchema = new mongoose.Schema({
   // Información básica del usuario
@@ -49,6 +50,24 @@ const userSchema = new mongoose.Schema({
     type: String,
     enum: ['free', 'basic', 'premium'],
     default: 'free'
+  },
+  
+  // NUEVO: Campo de seguridad para login attempts
+  security: {
+    loginAttempts: {
+      type: Number,
+      default: 0
+    },
+    lockUntil: {
+      type: Date
+    },
+    lastLogin: {
+      type: Date
+    },
+    isLocked: {
+      type: Boolean,
+      default: false
+    }
   },
   
   // Preferencias del usuario
@@ -107,6 +126,9 @@ const userSchema = new mongoose.Schema({
       default: 0
     },
     lastSessionDate: {
+      type: Date
+    },
+    lastActivity: {
       type: Date
     },
     streakDays: {
@@ -187,6 +209,7 @@ const userSchema = new mongoose.Schema({
 userSchema.index({ email: 1 });
 userSchema.index({ createdAt: -1 });
 userSchema.index({ lastLogin: -1 });
+userSchema.index({ 'security.lockUntil': 1 });
 
 // Virtual para obtener la edad de la cuenta
 userSchema.virtual('accountAge').get(function() {
@@ -202,6 +225,38 @@ userSchema.virtual('subscriptionStatus').get(function() {
   if (endDate < now) return 'expired';
   return 'active';
 });
+
+// 🔧 NUEVOS MÉTODOS PARA AUTENTICACIÓN
+
+// Método para comparar contraseñas
+userSchema.methods.comparePassword = async function(candidatePassword) {
+  return bcrypt.compare(candidatePassword, this.password);
+};
+
+// Método para incrementar intentos de login
+userSchema.methods.incLoginAttempts = async function() {
+  // Si ya está bloqueado
+  if (this.security.lockUntil && this.security.lockUntil < Date.now()) {
+    this.security.loginAttempts = 1;
+  } else {
+    this.security.loginAttempts += 1;
+  }
+  
+  // Bloquear después de 5 intentos fallidos
+  if (this.security.loginAttempts >= 5 && !this.security.lockUntil) {
+    this.security.lockUntil = Date.now() + (2 * 60 * 60 * 1000); // 2 horas
+  }
+  
+  return this.save();
+};
+
+// Método para resetear intentos de login
+userSchema.methods.resetLoginAttempts = async function() {
+  this.security.loginAttempts = 0;
+  this.security.lockUntil = undefined;
+  this.security.isLocked = false;
+  return this.save();
+};
 
 // Método para verificar si el usuario puede hacer más sesiones
 userSchema.methods.canStartSession = function() {
@@ -249,6 +304,20 @@ userSchema.methods.addMoodEntry = function(mood, context) {
   
   return this.save();
 };
+
+// Middleware para encriptar contraseñas antes de guardar
+userSchema.pre('save', async function(next) {
+  // Solo encriptar si la contraseña se modificó
+  if (!this.isModified('password')) return next();
+  
+  try {
+    const salt = await bcrypt.genSalt(10);
+    this.password = await bcrypt.hash(this.password, salt);
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
 
 // Middleware para sanitizar datos antes de guardar
 userSchema.pre('save', function(next) {
